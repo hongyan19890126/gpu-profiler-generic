@@ -59,7 +59,9 @@ def parse_kernels(output):
 
 
 def parse_memory(output):
-    """Parse memory statistics"""
+    """Parse memory statistics
+    Format: Time(%) Total Time Count Avg Median Min Max StdDev Name
+    """
     if not output:
         return []
     
@@ -72,14 +74,18 @@ def parse_memory(output):
             in_table = True
             continue
         if in_table and line.strip() and not line.startswith('Processing'):
-            match = re.match(r'\s*(\d+\.?\d*)\s+([\d,]+)\s+([\d,]+)\s+([\d,.]+)\s+(.+)', line)
-            if match:
+            # Match: pct total_time count avg median min max stddev name
+            # Name is everything from column 9 onwards (0-based index 8)
+            parts = line.split()
+            if len(parts) >= 9:
                 try:
+                    # Extract name (everything from column 9 onwards, 0-based index 8)
+                    name = ' '.join(parts[8:]).strip()
                     memory.append({
-                        'percentage': float(match.group(1)),
-                        'total_time_ns': float(match.group(2).replace(',', '')),
-                        'calls': int(match.group(3).replace(',', '')),
-                        'name': match.group(5).strip()
+                        'percentage': float(parts[0]),
+                        'total_time_ns': float(parts[1].replace(',', '')),
+                        'calls': int(parts[2].replace(',', '')),
+                        'name': name
                     })
                 except:
                     continue
@@ -88,7 +94,9 @@ def parse_memory(output):
 
 
 def parse_api(output):
-    """Parse API statistics"""
+    """Parse API statistics
+    Format: Time(%) Total Time Num Calls Avg Median Min Max StdDev Name
+    """
     if not output:
         return []
     
@@ -101,14 +109,18 @@ def parse_api(output):
             in_table = True
             continue
         if in_table and line.strip() and not line.startswith('Processing'):
-            match = re.match(r'\s*(\d+\.?\d*)\s+([\d,]+)\s+([\d,]+)\s+([\d,.]+)\s+(.+)', line)
-            if match:
+            # Match: pct total_time count avg median min max stddev name
+            # Name is everything from column 9 onwards (0-based index 8)
+            parts = line.split()
+            if len(parts) >= 9:
                 try:
+                    # Extract name (everything from column 9 onwards, 0-based index 8)
+                    name = ' '.join(parts[8:]).strip()
                     api.append({
-                        'percentage': float(match.group(1)),
-                        'total_time_ns': float(match.group(2).replace(',', '')),
-                        'calls': int(match.group(3).replace(',', '')),
-                        'name': match.group(5).strip()
+                        'percentage': float(parts[0]),
+                        'total_time_ns': float(parts[1].replace(',', '')),
+                        'calls': int(parts[2].replace(',', '')),
+                        'name': name
                     })
                 except:
                     continue
@@ -116,17 +128,37 @@ def parse_api(output):
     return api
 
 
-def parse_gpu_info(output):
-    """Extract GPU count and device info from nsys output"""
-    if not output:
-        return {'count': 1, 'devices': []}
-    
+def get_gpu_count(report_file):
+    """Get number of GPUs from nsys report using multiple methods"""
     devices = set()
-    for line in output.split('\n'):
-        if 'Device' in line and any(x in line for x in ['0', '1', '2', '3', '4', '5', '6', '7']):
-            match = re.search(r'Device\s+(\d+)', line)
+    
+    # Method 1: Try cuda_kern_exec_sum which has DevId column
+    output = run_nsys_command(f"nsys stats -r cuda_kern_exec_sum '{report_file}'")
+    if output:
+        for line in output.split('\n'):
+            # Match data lines: PID(56,137) TID(56,137) DevId(2) Count(553) ...
+            # PID/TID may have commas, DevId is simple integer
+            # Pattern: optional spaces, number_with_optional_comma, space, number_with_optional_comma, space, digit
+            match = re.match(r'^\s*[\d,]+\s+[\d,]+\s+(\d+)', line)
             if match:
-                devices.add(int(match.group(1)))
+                try:
+                    dev_id = int(match.group(1))
+                    if 0 <= dev_id <= 16:  # Reasonable GPU ID range
+                        devices.add(dev_id)
+                except:
+                    continue
+    
+    # Method 2: Try to get from SQLite export
+    if not devices:
+        output = run_nsys_command(f"nsys export -t sqlite '{report_file}' -o /tmp/check_gpu.sqlite && sqlite3 /tmp/check_gpu.sqlite \"SELECT DISTINCT deviceId FROM CUPTI_ACTIVITY_KIND_KERNEL;\"")
+        if output:
+            for line in output.split('\n'):
+                try:
+                    dev_id = int(line.strip())
+                    if 0 <= dev_id <= 16:
+                        devices.add(dev_id)
+                except:
+                    continue
     
     return {
         'count': len(devices) if devices else 1,
@@ -298,7 +330,7 @@ def generate_report(report_file, output_file=None):
     api = parse_api(api_output)
     
     print("[4/5] Detecting GPU configuration...")
-    gpu_info = parse_gpu_info(kernel_output)
+    gpu_info = get_gpu_count(report_file)
     duration = get_profile_duration(report_file)
     
     print("[5/5] Generating report...")
@@ -420,24 +452,23 @@ def generate_report(report_file, output_file=None):
         report.append(f"**Top 10 Account For**: {top10_time/total_kernel_time*100:.1f}%")
     report.append("")
     
-    report.append("### 4.1 Top Kernels")
+    report.append("### 4.1 All Kernels (Complete List)")
     report.append("")
     report.append("| Rank | Kernel | Time (s) | Percentage | Calls | Avg (ms) | Category |")
     report.append("|------|--------|----------|------------|-------|------------|----------|")
     
-    for i, k in enumerate(kernels[:20], 1):
+    for i, k in enumerate(kernels, 1):
         time_sec = k['total_time_ns'] / 1e9
         pct = k['percentage']
         avg_ms = k['avg_time_ns'] / 1e6
         cat = categorize_kernel(k['name'])
-        name = k['name'][:50] + '...' if len(k['name']) > 50 else k['name']
+        # Truncate very long names but keep more info
+        name = k['name'][:60] + '...' if len(k['name']) > 60 else k['name']
+        # Escape pipe characters in name
+        name = name.replace('|', '\\|')
         report.append(f"| {i} | {name} | {time_sec:.2f} | {pct:.2f}% | {k['calls']:,} | {avg_ms:.2f} | {cat} |")
     
     report.append("")
-    
-    if len(kernels) > 20:
-        report.append(f"... and {len(kernels) - 20} more kernels")
-        report.append("")
     
     report.append("### 4.2 Category Summary")
     report.append("")
