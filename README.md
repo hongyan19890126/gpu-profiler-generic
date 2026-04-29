@@ -3,7 +3,6 @@
 [![GitHub stars](https://img.shields.io/github/stars/hongyan19890126/gpu-profiler-generic?style=social)](https://github.com/hongyan19890126/gpu-profiler-generic/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/hongyan19890126/gpu-profiler-generic?style=social)](https://github.com/hongyan19890126/gpu-profiler-generic/network/members)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![NVIDIA](https://img.shields.io/badge/NVIDIA-CUDA-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![Skill](https://img.shields.io/badge/Skill-OpenCode-purple.svg)](https://github.com/features/copilot)
 
 A generic GPU profiling skill for analyzing any GPU-accelerated application (CUDA/OpenCL/graphics/compute/inference/training). Analyzes GPU kernel execution, memory transfers, API calls, and CPU/GPU timelines.
