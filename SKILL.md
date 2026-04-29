@@ -9,7 +9,7 @@ description: >-
   Compute (.ncu-rep), or raw nvidia-smi/nvprof data.
 license: Apache-2.0
 metadata:
-  author: Generic GPU Profiler
+  author: hongyan19890126
 ---
 
 # Generic GPU Profiling
