@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """
-GPU Profiling Report Generator
-Automatically generate comprehensive profiling report from .nsys-rep file
+GPU Profiling Report Generator - Dynamic Version
+Extracts REAL data from nsys-rep, no hardcoded assumptions
 
 Usage:
     python generate_report.py <profile.nsys-rep> [output.md]
-
-Example:
-    python generate_report.py layerwise_profile_v2.nsys-rep
-    python generate_report.py profile.nsys-rep my_report.md
 """
 
 import subprocess
-import json
 import sys
 import re
 from datetime import datetime
@@ -23,116 +18,265 @@ def run_nsys_command(cmd):
     """Run nsys command and return output"""
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=300
+            cmd, shell=True, capture_output=True, text=True, timeout=300
         )
         if result.returncode != 0:
-            print(f"Warning: Command failed: {cmd}")
-            print(f"Error: {result.stderr}")
             return None
         return result.stdout
-    except subprocess.TimeoutExpired:
-        print(f"Error: Command timed out: {cmd}")
-        return None
-    except Exception as e:
-        print(f"Error running command: {e}")
+    except Exception:
         return None
 
 
-def parse_nsys_stats(output, report_type):
-    """Parse nsys stats output into structured data"""
+def parse_kernels(output):
+    """Parse kernel statistics from nsys output"""
     if not output:
         return []
     
+    kernels = []
     lines = output.strip().split('\n')
-    data = []
+    in_table = False
     
-    # Find header line
-    header_idx = -1
-    for i, line in enumerate(lines):
-        if 'Time (%)' in line or 'Time(%)' in line:
-            header_idx = i
-            break
+    for line in lines:
+        if 'Time (%)' in line:
+            in_table = True
+            continue
+        if in_table and line.strip() and not line.startswith('Processing'):
+            # Match lines like: " 58.3  194,575,865,215    266,684  729,612.1  ..."
+            match = re.match(r'\s*(\d+\.?\d*)\s+([\d,]+)\s+([\d,]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,.]+)\s+(.+)', line)
+            if match:
+                try:
+                    kernels.append({
+                        'percentage': float(match.group(1)),
+                        'total_time_ns': float(match.group(2).replace(',', '')),
+                        'calls': int(match.group(3).replace(',', '')),
+                        'avg_time_ns': float(match.group(4).replace(',', '')),
+                        'name': match.group(9).strip()
+                    })
+                except:
+                    continue
     
-    if header_idx == -1:
+    return sorted(kernels, key=lambda x: x['total_time_ns'], reverse=True)
+
+
+def parse_memory(output):
+    """Parse memory statistics"""
+    if not output:
         return []
     
-    # Parse data lines (skip header and separator)
-    for line in lines[header_idx + 2:]:
-        if not line.strip() or line.startswith('Processing'):
-            continue
-        
-        # Try to parse columns
-        parts = line.split()
-        if len(parts) < 5:
-            continue
-        
-        try:
-            # Extract percentage (first column)
-            pct = float(parts[0])
-            
-            # Extract total time (second column, handle commas)
-            time_str = parts[1].replace(',', '')
-            total_time = float(time_str)
-            
-            # Extract instances/calls (third column)
-            calls_str = parts[2].replace(',', '')
-            calls = int(calls_str)
-            
-            # Extract average time (fourth column)
-            avg_str = parts[3].replace(',', '')
-            avg_time = float(avg_str)
-            
-            # Extract name (remaining columns)
-            name = ' '.join(parts[7:]) if len(parts) > 7 else ' '.join(parts[4:])
-            name = name.strip()
-            
-            data.append({
-                'name': name,
-                'percentage': pct,
-                'total_time_ns': total_time,
-                'calls': calls,
-                'avg_time_ns': avg_time
-            })
-        except (ValueError, IndexError):
-            continue
+    memory = []
+    lines = output.strip().split('\n')
+    in_table = False
     
-    return data
+    for line in lines:
+        if 'Time (%)' in line:
+            in_table = True
+            continue
+        if in_table and line.strip() and not line.startswith('Processing'):
+            match = re.match(r'\s*(\d+\.?\d*)\s+([\d,]+)\s+([\d,]+)\s+([\d,.]+)\s+(.+)', line)
+            if match:
+                try:
+                    memory.append({
+                        'percentage': float(match.group(1)),
+                        'total_time_ns': float(match.group(2).replace(',', '')),
+                        'calls': int(match.group(3).replace(',', '')),
+                        'name': match.group(5).strip()
+                    })
+                except:
+                    continue
+    
+    return memory
+
+
+def parse_api(output):
+    """Parse API statistics"""
+    if not output:
+        return []
+    
+    api = []
+    lines = output.strip().split('\n')
+    in_table = False
+    
+    for line in lines:
+        if 'Time (%)' in line:
+            in_table = True
+            continue
+        if in_table and line.strip() and not line.startswith('Processing'):
+            match = re.match(r'\s*(\d+\.?\d*)\s+([\d,]+)\s+([\d,]+)\s+([\d,.]+)\s+(.+)', line)
+            if match:
+                try:
+                    api.append({
+                        'percentage': float(match.group(1)),
+                        'total_time_ns': float(match.group(2).replace(',', '')),
+                        'calls': int(match.group(3).replace(',', '')),
+                        'name': match.group(5).strip()
+                    })
+                except:
+                    continue
+    
+    return api
+
+
+def parse_gpu_info(output):
+    """Extract GPU count and device info from nsys output"""
+    if not output:
+        return {'count': 1, 'devices': []}
+    
+    devices = set()
+    for line in output.split('\n'):
+        if 'Device' in line and any(x in line for x in ['0', '1', '2', '3', '4', '5', '6', '7']):
+            match = re.search(r'Device\s+(\d+)', line)
+            if match:
+                devices.add(int(match.group(1)))
+    
+    return {
+        'count': len(devices) if devices else 1,
+        'devices': sorted(list(devices))
+    }
+
+
+def get_profile_duration(report_file):
+    """Get actual profile duration from nsys"""
+    output = run_nsys_command(f"nsys stats -r osrt_sum '{report_file}'")
+    if output:
+        # Try to extract duration from output
+        for line in output.split('\n'):
+            if 'Duration' in line or 'Total Time' in line:
+                match = re.search(r'(\d+)\s*s', line)
+                if match:
+                    return int(match.group(1))
+    return 0
 
 
 def categorize_kernel(name):
     """Categorize kernel by function"""
     name_lower = name.lower()
     
-    if 'allreduce' in name_lower or 'allgather' in name_lower or 'nccl' in name_lower:
+    if any(x in name_lower for x in ['allreduce', 'allgather', 'nccl']):
         return 'Communication'
-    elif 'gemm' in name_lower or 'bmm' in name_lower or 'matmul' in name_lower:
+    elif any(x in name_lower for x in ['gemm', 'bmm', 'matmul']):
         return 'GEMM/Compute'
-    elif 'attention' in name_lower or 'fmha' in name_lower or 'flash' in name_lower:
+    elif any(x in name_lower for x in ['attention', 'fmha', 'flash']):
         return 'Attention'
-    elif 'moe' in name_lower or 'routing' in name_lower:
+    elif any(x in name_lower for x in ['moe', 'routing']):
         return 'MOE/Routing'
-    elif 'norm' in name_lower or 'layernorm' in name_lower or 'rmsnorm' in name_lower:
+    elif any(x in name_lower for x in ['norm', 'rmsnorm']):
         return 'Normalization'
-    elif 'quantize' in name_lower or 'cvt_' in name_lower:
+    elif any(x in name_lower for x in ['quantize', 'cvt_']):
         return 'Quantization'
-    elif 'memcpy' in name_lower or 'memset' in name_lower:
+    elif any(x in name_lower for x in ['memcpy', 'memset']):
         return 'Memory/Copy'
-    elif 'elementwise' in name_lower or 'activation' in name_lower or 'act_' in name_lower:
+    elif any(x in name_lower for x in ['elementwise', 'activation']):
         return 'Elementwise'
     elif 'triton' in name_lower:
         return 'Triton'
-    elif 'cub' in name_lower or 'scan' in name_lower or 'sort' in name_lower:
+    elif any(x in name_lower for x in ['cub', 'scan', 'sort']):
         return 'CUDA Primitives'
     else:
         return 'Other'
 
 
+def generate_ascii_bar(percentage, width=40):
+    """Generate ASCII progress bar"""
+    filled = int(width * min(percentage, 100) / 100)
+    return '[' + '#' * filled + ' ' * (width - filled) + ']'
+
+
+def analyze_bottlenecks(kernels, api, memory, categories):
+    """Dynamically analyze bottlenecks based on actual data"""
+    bottlenecks = []
+    total_time = sum(k['total_time_ns'] for k in kernels)
+    
+    # 1. Check for communication bottleneck
+    if 'Communication' in categories:
+        comm_time = categories['Communication']['time']
+        comm_pct = comm_time / total_time * 100
+        if comm_pct > 20:
+            bottlenecks.append({
+                'name': 'Communication Dominance',
+                'percentage': comm_pct,
+                'time': comm_time,
+                'severity': '🔴 CRITICAL' if comm_pct > 50 else '🟡 MEDIUM',
+                'evidence': f"Communication kernels take {comm_pct:.1f}% of GPU time",
+                'impact': 'GPUs idle waiting for synchronization',
+                'recommendations': [
+                    'Reduce sync frequency (gradient accumulation)',
+                    'Overlap communication with compute (CUDA streams)',
+                    'Use faster interconnect (NVLink, InfiniBand)'
+                ]
+            })
+    
+    # 2. Check for launch overhead
+    launch_apis = [a for a in api if 'launch' in a['name'].lower()]
+    if launch_apis:
+        total_api = sum(a['total_time_ns'] for a in api)
+        launch_time = sum(a['total_time_ns'] for a in launch_apis)
+        launch_pct = launch_time / total_api * 100 if total_api > 0 else 0
+        if launch_pct > 30:
+            bottlenecks.append({
+                'name': 'Kernel Launch Overhead',
+                'percentage': launch_pct,
+                'time': launch_time,
+                'severity': '🔴 CRITICAL' if launch_pct > 60 else '🟡 MEDIUM',
+                'evidence': f"Launch APIs take {launch_pct:.1f}% of API time ({sum(a['calls'] for a in launch_apis):,} launches)",
+                'impact': 'CPU bottleneck in submitting work to GPU',
+                'recommendations': [
+                    'Enable CUDA Graphs',
+                    'Batch small kernels',
+                    'Use persistent kernels'
+                ]
+            })
+    
+    # 3. Check for memory bottleneck
+    if memory:
+        d2h = [m for m in memory if 'Device-to-Host' in m['name']]
+        if d2h:
+            total_mem = sum(m['total_time_ns'] for m in memory)
+            d2h_pct = d2h[0]['total_time_ns'] / total_mem * 100 if total_mem > 0 else 0
+            if d2h_pct > 30:
+                bottlenecks.append({
+                    'name': 'Memory Transfer Overhead',
+                    'percentage': d2h_pct,
+                    'time': d2h[0]['total_time_ns'],
+                    'severity': '🟡 MEDIUM',
+                    'evidence': f"D2H transfers take {d2h_pct:.1f}% of memory time",
+                    'impact': 'Pipeline stalls due to synchronization',
+                    'recommendations': [
+                        'Use pinned (page-locked) memory',
+                        'Minimize D2H transfers',
+                        'Use non_blocking transfers'
+                    ]
+                })
+    
+    # 4. Check for compute bottleneck
+    if 'GEMM/Compute' in categories:
+        compute_time = categories['GEMM/Compute']['time']
+        compute_pct = compute_time / total_time * 100
+        if compute_pct > 60:
+            bottlenecks.append({
+                'name': 'Compute Saturation',
+                'percentage': compute_pct,
+                'time': compute_time,
+                'severity': '🟡 MEDIUM',
+                'evidence': f"Compute kernels take {compute_pct:.1f}% of GPU time",
+                'impact': 'SMs are fully utilized',
+                'recommendations': [
+                    'Optimize kernel efficiency with Nsight Compute',
+                    'Check memory coalescing',
+                    'Consider mixed precision (FP16/BF16)'
+                ]
+            })
+    
+    # 5. Check for idle GPU
+    if total_time > 0:
+        # Estimate idle time from gaps between kernels
+        # This is a rough estimate - actual idle time needs timeline analysis
+        pass
+    
+    return bottlenecks
+
+
 def generate_report(report_file, output_file=None):
-    """Generate comprehensive profiling report"""
+    """Generate comprehensive profiling report with REAL data"""
     
     if output_file is None:
         output_file = report_file.replace('.nsys-rep', '_report.md')
@@ -141,77 +285,119 @@ def generate_report(report_file, output_file=None):
     print("This may take a few minutes...")
     
     # Extract data
-    print("\n[1/4] Extracting kernel statistics...")
-    kernel_output = run_nsys_command(
-        f"nsys stats -r cuda_gpu_kern_sum '{report_file}'"
-    )
-    kernels = parse_nsys_stats(kernel_output, "cuda_gpu_kern_sum")
+    print("\n[1/5] Extracting kernel statistics...")
+    kernel_output = run_nsys_command(f"nsys stats -r cuda_gpu_kern_sum '{report_file}'")
+    kernels = parse_kernels(kernel_output)
     
-    print("[2/4] Extracting memory statistics...")
-    memory_output = run_nsys_command(
-        f"nsys stats -r cuda_gpu_mem_time_sum '{report_file}'"
-    )
-    memory = parse_nsys_stats(memory_output, "cuda_gpu_mem_time_sum")
+    print("[2/5] Extracting memory statistics...")
+    memory_output = run_nsys_command(f"nsys stats -r cuda_gpu_mem_time_sum '{report_file}'")
+    memory = parse_memory(memory_output)
     
-    print("[3/4] Extracting API statistics...")
-    api_output = run_nsys_command(
-        f"nsys stats -r cuda_api_sum '{report_file}'"
-    )
-    api = parse_nsys_stats(api_output, "cuda_api_sum")
+    print("[3/5] Extracting API statistics...")
+    api_output = run_nsys_command(f"nsys stats -r cuda_api_sum '{report_file}'")
+    api = parse_api(api_output)
     
-    print("[4/4] Generating report...")
+    print("[4/5] Detecting GPU configuration...")
+    gpu_info = parse_gpu_info(kernel_output)
+    duration = get_profile_duration(report_file)
+    
+    print("[5/5] Generating report...")
     
     # Calculate totals
     total_kernel_time = sum(k['total_time_ns'] for k in kernels)
     total_memory_time = sum(m['total_time_ns'] for m in memory)
     total_api_time = sum(a['total_time_ns'] for a in api)
+    total_calls = sum(k['calls'] for k in kernels)
     
     # Categorize kernels
     categories = {}
     for k in kernels:
         cat = categorize_kernel(k['name'])
         if cat not in categories:
-            categories[cat] = {'count': 0, 'time': 0, 'kernels': []}
+            categories[cat] = {'count': 0, 'time': 0}
         categories[cat]['count'] += 1
         categories[cat]['time'] += k['total_time_ns']
-        categories[cat]['kernels'].append(k)
     
-    # Sort categories by time
     sorted_categories = sorted(
-        categories.items(),
-        key=lambda x: x[1]['time'],
-        reverse=True
+        categories.items(), key=lambda x: x[1]['time'], reverse=True
     )
     
-    # Generate markdown report
+    # Analyze bottlenecks
+    bottlenecks = analyze_bottlenecks(kernels, api, memory, categories)
+    
+    # Generate report
     report = []
+    
+    # Header
     report.append("# GPU Profiling Report")
     report.append("")
     report.append(f"**File**: `{Path(report_file).name}`")
     report.append(f"**Analysis Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     report.append(f"**Tool**: NVIDIA Nsight Systems + Generic GPU Profiler")
     report.append("")
+    report.append("---")
+    report.append("")
     
-    # Overview
+    # 1. Overview - with REAL data
     report.append("## 1. Overview")
     report.append("")
-    report.append(f"| Metric | Value |")
-    report.append(f"|--------|-------|")
-    report.append(f"| Total Kernels | {len(kernels)} |")
-    report.append(f"| Total Kernel Time | {total_kernel_time/1e9:.2f}s |")
-    report.append(f"| Total Memory Time | {total_memory_time/1e9:.2f}s |")
-    report.append(f"| Total API Time | {total_api_time/1e9:.2f}s |")
+    report.append("| Metric | Value |")
+    report.append("|--------|-------|")
+    
+    if duration > 0:
+        report.append(f"| Total Duration | {duration}s |")
+    else:
+        report.append(f"| Total Kernel Time | {total_kernel_time/1e9:.2f}s |")
+    
+    report.append(f"| GPUs Detected | {gpu_info['count']} |")
+    report.append(f"| Unique Kernels | {len(kernels)} |")
+    report.append(f"| Total Kernel Launches | {total_calls:,} |")
+    report.append(f"| Total GPU Time | {total_kernel_time/1e9:.2f}s |")
     report.append("")
     
-    # Execution Timeline
+    # 2. Execution Timeline - with REAL data
     report.append("## 2. Execution Timeline")
     report.append("")
+    report.append("### 2.1 High-Level Flow")
+    report.append("")
     report.append("```")
-    report.append("[Host] -> [H2D] -> [GPU Execution] -> [D2H] -> [Host]")
+    
+    if memory:
+        h2d_time = sum(m['total_time_ns'] for m in memory if 'Host-to-Device' in m['name']) / 1e6
+        d2h_time = sum(m['total_time_ns'] for m in memory if 'Device-to-Host' in m['name']) / 1e6
+        report.append(f"[Host] -> [H2D: {h2d_time:.2f}ms] -> [GPU: {total_kernel_time/1e9:.0f}s] -> [D2H: {d2h_time:.2f}ms] -> [Host]")
+    else:
+        report.append(f"[Host] -> [H2D] -> [GPU: {total_kernel_time/1e9:.0f}s] -> [D2H] -> [Host]")
+    
     report.append("```")
     report.append("")
     
-    # Time Distribution
+    # GPU utilization - dynamic based on actual GPU count
+    if gpu_info['count'] > 1:
+        report.append("### 2.2 Per-GPU Execution")
+        report.append("")
+        report.append("| GPU | Status |")
+        report.append("|-----|--------|")
+        for dev in gpu_info['devices']:
+            report.append(f"| Device {dev} | Active |")
+        report.append("")
+    
+    report.append("### 2.3 GPU Execution Breakdown")
+    report.append("")
+    report.append(f"```")
+    report.append(f"Total GPU Time: {total_kernel_time/1e9:.0f} seconds")
+    report.append("")
+    
+    for cat_name, cat_data in sorted_categories[:6]:
+        pct = cat_data['time'] / total_kernel_time * 100
+        time_sec = cat_data['time'] / 1e9
+        bar = generate_ascii_bar(pct, 40)
+        report.append(f"{cat_name:<20} {bar}  {pct:.1f}%  {time_sec:.0f}s")
+    
+    report.append("```")
+    report.append("")
+    
+    # 3. Time Distribution
     report.append("## 3. Time Distribution")
     report.append("")
     report.append("| Category | Time (s) | Percentage |")
@@ -224,34 +410,35 @@ def generate_report(report_file, output_file=None):
     
     report.append("")
     
-    # Complete Kernel Breakdown
+    # 4. Complete Kernel Breakdown
     report.append("## 4. Complete Kernel Breakdown")
     report.append("")
     report.append(f"**Total Kernels**: {len(kernels)}")
-    report.append(f"**Total Launches**: {sum(k['calls'] for k in kernels):,}")
+    report.append(f"**Total Launches**: {total_calls:,}")
     if len(kernels) > 0:
         top10_time = sum(k['total_time_ns'] for k in kernels[:10])
         report.append(f"**Top 10 Account For**: {top10_time/total_kernel_time*100:.1f}%")
     report.append("")
     
-    # Top kernels table
-    report.append("### 4.1 All Kernels (Sorted by Time)")
+    report.append("### 4.1 Top Kernels")
     report.append("")
     report.append("| Rank | Kernel | Time (s) | Percentage | Calls | Avg (ms) | Category |")
     report.append("|------|--------|----------|------------|-------|------------|----------|")
     
-    for i, k in enumerate(kernels, 1):
+    for i, k in enumerate(kernels[:20], 1):
         time_sec = k['total_time_ns'] / 1e9
         pct = k['percentage']
         avg_ms = k['avg_time_ns'] / 1e6
         cat = categorize_kernel(k['name'])
-        # Truncate long names
-        name = k['name'][:60] + '...' if len(k['name']) > 60 else k['name']
+        name = k['name'][:50] + '...' if len(k['name']) > 50 else k['name']
         report.append(f"| {i} | {name} | {time_sec:.2f} | {pct:.2f}% | {k['calls']:,} | {avg_ms:.2f} | {cat} |")
     
     report.append("")
     
-    # Category Summary
+    if len(kernels) > 20:
+        report.append(f"... and {len(kernels) - 20} more kernels")
+        report.append("")
+    
     report.append("### 4.2 Category Summary")
     report.append("")
     report.append("| Category | Kernels | Total Time (s) | Percentage |")
@@ -264,7 +451,7 @@ def generate_report(report_file, output_file=None):
     
     report.append("")
     
-    # Memory Analysis
+    # 5. Memory Analysis
     if memory:
         report.append("## 5. Memory Operations")
         report.append("")
@@ -274,11 +461,11 @@ def generate_report(report_file, output_file=None):
         for m in memory[:10]:
             time_sec = m['total_time_ns'] / 1e9
             pct = m['percentage']
-            report.append(f"| {m['name']} | {time_sec:.2f} | {pct:.1f}% | {m['calls']:,} |")
+            report.append(f"| {m['name']} | {time_sec:.4f} | {pct:.1f}% | {m['calls']:,} |")
         
         report.append("")
     
-    # API Analysis
+    # 6. API Analysis
     if api:
         report.append("## 6. API Overhead")
         report.append("")
@@ -292,63 +479,85 @@ def generate_report(report_file, output_file=None):
         
         report.append("")
     
-    # Bottleneck Analysis
-    report.append("## 7. Bottleneck Analysis")
-    report.append("")
-    
-    # Find top bottleneck
-    if sorted_categories:
-        top_cat, top_data = sorted_categories[0]
-        top_pct = top_data['time'] / total_kernel_time * 100
-        report.append(f"1. **{top_cat} Dominance ({top_pct:.1f}%)**")
-        report.append(f"   - Time: {top_data['time']/1e9:.2f}s")
-        report.append(f"   - Kernels: {top_data['count']}")
-        if top_cat == 'Communication':
-            report.append(f"   - Impact: GPUs idle waiting for synchronization")
-            report.append(f"   - Recommendation: Reduce sync frequency, overlap communication")
-        elif top_cat == 'GEMM/Compute':
-            report.append(f"   - Impact: Saturated compute units")
-            report.append(f"   - Recommendation: Optimize kernel efficiency")
+    # 7. Bottleneck Analysis - DYNAMIC based on actual data
+    if bottlenecks:
+        report.append("## 7. Bottleneck Analysis")
         report.append("")
+        
+        for i, b in enumerate(bottlenecks, 1):
+            report.append(f"### {i}. {b['name']} ({b['percentage']:.1f}%)")
+            report.append("")
+            report.append(f"**Time**: {b['time']/1e9:.2f}s")
+            report.append("")
+            report.append("**Evidence**:")
+            report.append(f"- {b['evidence']}")
+            report.append("")
+            report.append(f"**Impact**: {b['impact']}")
+            report.append(f"**Severity**: {b['severity']}")
+            report.append("")
     
-    # Check launch overhead
-    launch_apis = [a for a in api if 'launch' in a['name'].lower()]
-    if launch_apis:
-        launch_time = sum(a['total_time_ns'] for a in launch_apis)
-        launch_pct = launch_time / total_api_time * 100 if total_api_time > 0 else 0
-        report.append(f"2. **Launch Overhead ({launch_pct:.1f}%)**")
-        report.append(f"   - APIs: {', '.join(a['name'] for a in launch_apis[:3])}")
-        report.append(f"   - Recommendation: Use CUDA Graphs, batch kernels")
-        report.append("")
-    
-    # Optimization Recommendations
+    # 8. Optimization Recommendations - DYNAMIC based on bottlenecks
     report.append("## 8. Optimization Recommendations")
     report.append("")
     
-    if sorted_categories and sorted_categories[0][0] == 'Communication':
-        report.append("- [ ] P0: Reduce communication frequency (gradient accumulation)")
-        report.append("- [ ] P0: Overlap communication with compute (CUDA streams)")
+    if bottlenecks:
+        # P0 recommendations
+        critical_bottlenecks = [b for b in bottlenecks if 'CRITICAL' in b['severity']]
+        if critical_bottlenecks:
+            report.append("### 🔴 P0: Critical Issues")
+            report.append("")
+            
+            for b in critical_bottlenecks:
+                report.append(f"**{b['name']}**")
+                report.append("")
+                for rec in b['recommendations'][:2]:
+                    report.append(f"- {rec}")
+                report.append("")
+        
+        # P1 recommendations
+        medium_bottlenecks = [b for b in bottlenecks if 'MEDIUM' in b['severity']]
+        if medium_bottlenecks:
+            report.append("### 🟡 P1: Medium Priority")
+            report.append("")
+            
+            for b in medium_bottlenecks:
+                report.append(f"**{b['name']}**")
+                report.append("")
+                for rec in b['recommendations'][:2]:
+                    report.append(f"- {rec}")
+                report.append("")
     
-    if launch_apis and sum(a['total_time_ns'] for a in launch_apis) / total_api_time * 100 > 30:
-        report.append("- [ ] P0: Enable CUDA Graphs to reduce launch overhead")
+    # Generic recommendations if no specific bottlenecks
+    if not bottlenecks:
+        report.append("No major bottlenecks detected. General optimizations:")
+        report.append("")
+        report.append("- Profile with Nsight Compute for kernel-level optimization")
+        report.append("- Check memory access patterns")
+        report.append("- Consider mixed precision (FP16/BF16)")
+        report.append("")
     
-    report.append("- [ ] P1: Use pinned memory for transfers")
-    report.append("- [ ] P1: Batch small kernels into larger ones")
-    report.append("- [ ] P2: Profile again after optimizations")
+    # 9. Action Items
+    report.append("## 9. Action Items")
+    report.append("")
+    report.append("- [ ] Review bottleneck analysis above")
+    report.append("- [ ] Implement P0 recommendations first")
+    report.append("- [ ] Profile again after optimizations")
+    report.append("- [ ] Compare before/after performance")
     report.append("")
     
     # Footer
     report.append("---")
     report.append("*Generated by GPU Profiler Generic Skill*")
-    report.append(f"*Repository: https://github.com/hongyan19890126/gpu-profiler-generic*")
+    report.append("*Repository: https://github.com/hongyan19890126/gpu-profiler-generic*")
     
     # Write report
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write('\n'.join(report))
     
     print(f"\n✅ Report generated: {output_file}")
-    print(f"   Kernels analyzed: {len(kernels)}")
+    print(f"   Kernels: {len(kernels)}")
     print(f"   Categories: {len(categories)}")
+    print(f"   Bottlenecks: {len(bottlenecks)}")
     print(f"   Total time: {total_kernel_time/1e9:.2f}s")
 
 
@@ -357,7 +566,6 @@ def main():
         print("Usage: python generate_report.py <profile.nsys-rep> [output.md]")
         print("\nExample:")
         print("  python generate_report.py layerwise_profile_v2.nsys-rep")
-        print("  python generate_report.py profile.nsys-rep my_report.md")
         sys.exit(1)
     
     report_file = sys.argv[1]
