@@ -36,18 +36,37 @@ git clone https://github.com/hongyan19890126/gpu-profiler-generic.git
 
 ## Quick Start
 
-### 1. Profile your application
+### Option 1: Automated Report Generation (Recommended)
+
+Generate complete profiling report with one command:
+
 ```bash
+# 1. Profile your application
 nsys profile -t cuda,nvtx -o profile -- ./your_app
+
+# 2. Auto-generate report
+python generate_report.py profile.nsys-rep
+
+# Output: profile_report.md (complete analysis with all kernels)
 ```
 
-### 2. Generate report
+The script automatically:
+- Extracts all kernel statistics
+- Categorizes kernels (Communication, GEMM, Attention, etc.)
+- Analyzes memory operations
+- Detects bottlenecks
+- Generates optimization recommendations
+
+### Option 2: Manual Analysis
+
 ```bash
+# 1. Profile
+nsys profile -t cuda,nvtx -o profile -- ./your_app
+
+# 2. Manual stats extraction
 nsys stats -r cuda_gpu_kern_sum,cuda_gpu_mem_time_sum profile.nsys-rep
-```
 
-### 3. Analyze all kernels
-```bash
+# 3. Export to CSV for custom analysis
 nsys stats -r cuda_gpu_kern_sum --format csv profile.nsys-rep > all_kernels.csv
 ```
 
